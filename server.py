@@ -22,6 +22,7 @@ CLIENT_ID = os.environ.get("USERTESTING_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("USERTESTING_CLIENT_SECRET", "")
 BASE_URL = "https://api.use2.usertesting.com"
 TOKEN_URL = "https://auth.usertesting.com/oauth2/aus1p3vtd8vtm4Bxv0h8/v1/token"
+V1_BASE_PATH = "/usertesting/api/v1"
 
 server = Server("usertesting")
 
@@ -80,7 +81,36 @@ def _get_text(path: str) -> str:
         return r.text
 
 
+def _client_v1() -> httpx.Client:
+    """HTTP client for V1 API — uses `token` header instead of Authorization: Bearer."""
+    return httpx.Client(headers={"token": _get_token()}, timeout=60)
+
+
+def _get_v1(path: str, params: dict | None = None) -> dict:
+    with _client_v1() as c:
+        r = c.get(f"{BASE_URL}{V1_BASE_PATH}{path}", params=params)
+        r.raise_for_status()
+        return r.json()
+
+
 _MAX_PAGES = 50  # 50 * 500 = 25,000 sessions max
+
+
+def _get_all_completed_sessions(study_uuid: str) -> list[dict]:
+    """Fetch all completed sessions for a V1 study, cursor-paginating."""
+    sessions: list[dict] = []
+    cursor = None
+    for _ in range(_MAX_PAGES):
+        params = {"cursor": cursor} if cursor else None
+        data = _get_v1(f"/studies/{study_uuid}/completed-sessions", params=params)
+        batch = data.get("sessions", [])
+        sessions.extend(batch)
+        if not batch:
+            break
+        cursor = batch[-1].get("cursor")
+        if not cursor:
+            break
+    return sessions
 
 
 def _get_all_sessions(test_id: str) -> list[dict]:
@@ -182,6 +212,140 @@ def _format_session_details(data: dict) -> str:
                 lines.append(f"  Response:  {response}")
             lines.append("")
 
+    return "\n".join(lines)
+
+
+def _format_workspaces(data: list) -> str:
+    if not data:
+        return "No workspaces found."
+    lines = [f"{'ID':<10} {'UUID':<38} Name", "-" * 80]
+    for w in data:
+        lines.append(f"{str(w.get('id', '')):<10} {w.get('uuid', ''):<38} {w.get('name', '')}")
+    lines.append(f"\nTotal: {len(data)} workspace(s)")
+    return "\n".join(lines)
+
+
+def _format_workspace_studies(data: list) -> str:
+    if not data:
+        return "No studies found in this workspace."
+    lines = ["Studies in workspace:", "-" * 60]
+    for s in data:
+        lines.append(f"Title:      {s.get('title', '')}")
+        lines.append(f"UUID:       {s.get('uuid', '')}")
+        lines.append(f"Ordered At: {s.get('orderedAt', '')}")
+        by = s.get("orderedBy", {})
+        if by:
+            lines.append(f"Ordered By: {by.get('name', '')} ({by.get('email', '')})")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _format_study(data: dict) -> str:
+    lines = [
+        f"Title:         {data.get('title', '')}",
+        f"Session Count: {data.get('sessionCount', '')}",
+    ]
+    ordered_by = data.get("orderedBy", {})
+    if ordered_by:
+        lines.append(f"Ordered By:    {ordered_by.get('name', '')} ({ordered_by.get('email', '')})")
+    tasks = data.get("tasks", [])
+    if tasks:
+        lines.append(f"\nTasks ({len(tasks)}):")
+        lines.append("-" * 60)
+        for t in tasks:
+            lines.append(f"  [{t.get('position', '')}] {t.get('taskType', '')}: {t.get('text', '')}")
+    nps = data.get("netPromoterScores", [])
+    if nps:
+        lines.append("\nNet Promoter Scores:")
+        for score in nps:
+            lines.append(
+                f"  Score {score.get('score', '')}: "
+                f"{score.get('promoterPercentage', '')}% promoters, "
+                f"{score.get('passivePercentage', '')}% passives, "
+                f"{score.get('detractorPercentage', '')}% detractors"
+            )
+    return "\n".join(lines)
+
+
+def _format_clip(data: dict) -> str:
+    lines = [
+        f"Type:      {data.get('typeName', '')}",
+        f"Duration:  {data.get('duration', '')}s",
+        f"Created:   {data.get('createdAt', '')}",
+        f"Important: {data.get('isImportant', '')}",
+    ]
+    if data.get("note"):
+        lines.append(f"Note:      {data['note']}")
+    if data.get("noteTags"):
+        lines.append(f"Tags:      {', '.join(data['noteTags'])}")
+    if data.get("sentimentTag"):
+        lines.append(f"Sentiment: {data['sentimentTag']}")
+    study = data.get("study", {})
+    if study:
+        lines.append(f"Study:     {study.get('title', '')}")
+    if data.get("embeddableUrl"):
+        lines.append(f"\nEmbeddable URL:\n{data['embeddableUrl']}")
+    return "\n".join(lines)
+
+
+def _format_highlight_reel(data: dict) -> str:
+    lines = [
+        f"Title:    {data.get('title', '')}",
+        f"ID:       {data.get('id', '')}",
+        f"Duration: {data.get('duration', '')}s",
+        f"Created:  {data.get('createdAt', '')}",
+        f"Updated:  {data.get('updatedAt', '')}",
+    ]
+    if data.get("shareUrl"):
+        lines.append(f"\nShare URL:\n{data['shareUrl']}")
+    clips = data.get("clips", {})
+    nodes = clips.get("nodes", [])
+    total = clips.get("totalCount", 0)
+    if total:
+        lines.append(f"\nClips ({total} total):")
+        for c in nodes:
+            lines.append(f"  ID: {c.get('id', '')} — Duration: {c.get('duration', '')}s")
+    return "\n".join(lines)
+
+
+def _format_session_v1(data: dict) -> str:
+    lines = [
+        f"Session ID:    {data.get('sessionId', '')}",
+        f"UID:           {data.get('uid', '')}",
+        f"Title:         {data.get('title', '')}",
+        f"Duration:      {data.get('duration', '')}s",
+        f"Sequence #:    {data.get('sequenceNumber', '')}",
+        f"State Updated: {data.get('stateUpdatedAt', '')}",
+    ]
+    notes = data.get("notes", [])
+    if notes:
+        lines.append(f"\nNotes ({len(notes)}):")
+        for n in notes:
+            lines.append(f"  - {n}")
+    return "\n".join(lines)
+
+
+def _format_completed_sessions(sessions: list[dict]) -> str:
+    if not sessions:
+        return "No completed sessions found."
+    lines = [f"Total: {len(sessions)} completed session(s)\n"]
+    for s in sessions:
+        lines.append(f"Session ID:   {s.get('sessionId', '')} ({s.get('sessionUuid', '')})")
+        lines.append(f"State:        {s.get('state', '')}")
+        lines.append(f"Completed:    {s.get('completedDateTime', '')}")
+        lines.append(f"Form Factor:  {s.get('formFactorUsed', '')}")
+        participant = s.get("participant", {})
+        if participant:
+            lines.append(f"Participant:  {participant.get('name', '')}")
+            for d in participant.get("demographics", []):
+                lines.append(f"  {d.get('label', '')}: {d.get('value', '')}")
+        answers = s.get("answers", [])
+        if answers:
+            lines.append(f"Answers ({len(answers)}):")
+            for a in answers:
+                for resp in a.get("responses", [])[:3]:
+                    lines.append(f"  [{a.get('type', '')}] {resp}")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -441,6 +605,114 @@ async def list_tools() -> list[Tool]:
                 "required": ["test_id"],
             },
         ),
+        # --- V1 API tools ---
+        Tool(
+            name="list_workspaces",
+            description="List all workspaces accessible to the authenticated user (V1 API).",
+            inputSchema={"type": "object", "properties": {}, "required": []},
+        ),
+        Tool(
+            name="get_workspace_studies",
+            description=(
+                "List all studies in a workspace (V1 API). "
+                "Returns study titles, UUIDs, and ordering info."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_uuid": {
+                        "type": "string",
+                        "description": "Workspace UUID from list_workspaces",
+                    }
+                },
+                "required": ["workspace_uuid"],
+            },
+        ),
+        Tool(
+            name="get_study",
+            description=(
+                "Get metadata and task configuration for a study (V1 API). "
+                "Returns title, session count, tasks, and Net Promoter Scores."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "study_uuid": {
+                        "type": "string",
+                        "description": "Study UUID from get_workspace_studies or the app URL",
+                    }
+                },
+                "required": ["study_uuid"],
+            },
+        ),
+        Tool(
+            name="get_completed_sessions",
+            description=(
+                "Get all completed sessions for a study (V1 API). "
+                "Richer than list_sessions — includes participant demographics, screener responses, "
+                "task answers, and transcript snippets. Auto-paginates."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "study_uuid": {
+                        "type": "string",
+                        "description": "Study UUID from get_workspace_studies or the app URL",
+                    }
+                },
+                "required": ["study_uuid"],
+            },
+        ),
+        Tool(
+            name="get_clip",
+            description=(
+                "Get metadata for a clip (V1 API): duration, note, tags, sentiment, "
+                "and embeddable URL."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "clip_uuid": {
+                        "type": "string",
+                        "description": "Clip UUID from the app URL when viewing a clip",
+                    }
+                },
+                "required": ["clip_uuid"],
+            },
+        ),
+        Tool(
+            name="get_highlight_reel",
+            description=(
+                "Get a highlight reel (V1 API): title, duration, share URL, and list of clips."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "reel_uuid": {
+                        "type": "string",
+                        "description": "Highlight reel UUID from the app URL",
+                    }
+                },
+                "required": ["reel_uuid"],
+            },
+        ),
+        Tool(
+            name="get_session_embed",
+            description=(
+                "Get embeddable session metadata (V1 API): title, duration, sequence number, "
+                "and state. Use get_session_details for richer task/demographic data."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "session_uuid": {
+                        "type": "string",
+                        "description": "Session UUID from the app URL or get_completed_sessions",
+                    }
+                },
+                "required": ["session_uuid"],
+            },
+        ),
     ]
 
 
@@ -457,6 +729,20 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return await _handle_get_video_url(arguments["session_id"])
         elif name == "get_qx_scores":
             return await _handle_get_qx_scores(arguments["test_id"])
+        elif name == "list_workspaces":
+            return await _handle_list_workspaces()
+        elif name == "get_workspace_studies":
+            return await _handle_get_workspace_studies(arguments["workspace_uuid"])
+        elif name == "get_study":
+            return await _handle_get_study(arguments["study_uuid"])
+        elif name == "get_completed_sessions":
+            return await _handle_get_completed_sessions(arguments["study_uuid"])
+        elif name == "get_clip":
+            return await _handle_get_clip(arguments["clip_uuid"])
+        elif name == "get_highlight_reel":
+            return await _handle_get_highlight_reel(arguments["reel_uuid"])
+        elif name == "get_session_embed":
+            return await _handle_get_session_embed(arguments["session_uuid"])
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
@@ -491,6 +777,47 @@ async def _handle_get_video_url(session_id: str) -> list[TextContent]:
 async def _handle_get_qx_scores(test_id: str) -> list[TextContent]:
     data = _get(f"/api/v2/testResults/{test_id}/qxScores")
     return [TextContent(type="text", text=_format_qx_scores(data))]
+
+
+async def _handle_list_workspaces() -> list[TextContent]:
+    data = _get_v1("/workspaces")
+    workspaces = data if isinstance(data, list) else data.get("workspaces", [])
+    return [TextContent(type="text", text=_format_workspaces(workspaces))]
+
+
+async def _handle_get_workspace_studies(workspace_uuid: str) -> list[TextContent]:
+    data = _get_v1(f"/workspaces/{workspace_uuid}")
+    studies = data if isinstance(data, list) else data.get("studies", [])
+    return [TextContent(type="text", text=_format_workspace_studies(studies))]
+
+
+async def _handle_get_study(study_uuid: str) -> list[TextContent]:
+    data = _get_v1(f"/studies/{study_uuid}")
+    study = data.get("study", data)
+    return [TextContent(type="text", text=_format_study(study))]
+
+
+async def _handle_get_completed_sessions(study_uuid: str) -> list[TextContent]:
+    sessions = _get_all_completed_sessions(study_uuid)
+    return [TextContent(type="text", text=_format_completed_sessions(sessions))]
+
+
+async def _handle_get_clip(clip_uuid: str) -> list[TextContent]:
+    data = _get_v1(f"/clip/{clip_uuid}")
+    clip = data.get("clip", data)
+    return [TextContent(type="text", text=_format_clip(clip))]
+
+
+async def _handle_get_highlight_reel(reel_uuid: str) -> list[TextContent]:
+    data = _get_v1(f"/highlightreel/{reel_uuid}")
+    reel = data.get("highlightReel", data)
+    return [TextContent(type="text", text=_format_highlight_reel(reel))]
+
+
+async def _handle_get_session_embed(session_uuid: str) -> list[TextContent]:
+    data = _get_v1(f"/session/{session_uuid}")
+    session = data.get("session", data)
+    return [TextContent(type="text", text=_format_session_v1(session))]
 
 
 # ---------------------------------------------------------------------------
